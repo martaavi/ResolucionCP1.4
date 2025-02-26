@@ -1,0 +1,59 @@
+//
+// CD-agentes
+//
+pipeline {
+    agent none
+
+    stages {
+        stage('Get Code') {
+            agent any
+            steps {
+                deleteDir()
+                checkout scm
+                sh 'wget https://raw.githubusercontent.com/anieto-unir/todo-list-aws-config/refs/heads/production/samconfig.toml'
+                stash name:'code', includes:'**'
+                echo "Code"
+                deleteDir()
+            }
+        }
+
+        stage('Deploy') {
+            agent {label 'deployment'}            
+            steps {
+                deleteDir()
+                unstash name:'code'
+                sh '''
+                   sam build
+                   sam deploy --resolve-s3 --stack-name "todo-list-aws-production" --region "us-east-1" --no-fail-on-empty-changeset --parameter-overrides Stage=production
+                   BASE_URL=$(aws cloudformation describe-stacks --stack-name todo-list-aws-production --query 'Stacks[0].Outputs[?OutputKey==`BaseUrlApi`].OutputValue' --output text)
+                   echo "export BASE_URL=${BASE_URL}" > env.sh
+                   chmod a+x env.sh
+                   echo "La URL de la API es: ${BASE_URL}"
+                '''
+                stash name:'test-env', includes:'env.sh'
+                deleteDir()
+            }
+        }
+        
+        stage('Smoke Test')
+        {
+            agent {label 'testing'}
+            steps {
+                deleteDir()
+                unstash name:'code'
+                unstash name:'test-env'
+                sh '''
+                   . ./env.sh
+                   python3 -m pytest -m smoke --junit-xml=result-int.xml test/integration/todoApiTest.py
+                '''
+                junit allowEmptyResults: true, testResults:'result-int.xml'
+                script
+                {
+                    if (currentBuild.result == 'UNSTABLE')
+                        error("")
+                }
+                deleteDir()
+            }
+        }
+    }
+}
